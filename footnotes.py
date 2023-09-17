@@ -1,148 +1,172 @@
 import concurrent.futures
 import spacy
 import pandas as pd
-from sqlalchemy import create_engine
-from textacy import extract
+import os
+from sqlalchemy import create_engine, text
+from textacy.extract.basics import ngrams
 from glob import glob
+from tqdm import tqdm
 
-engine = create_engine("sqlite:///database.sqlite")
+#Set the connection to the database
+user = 'footnotes'
+password = 'ho9PC6eMXz3V5ZAujHpN'
+host = 'localhost'
+dbname = 'footnotes'
+engine = create_engine("postgresql+psycopg2://{user}:{password}@{host}/{dbname}"
+                    .format(user = user,password = password,host = host,dbname = dbname))
+conn = engine.connect()
+
+#Load the spacy model
 nlp = spacy.load("en_core_web_sm")
+#Increase the max length of the text to process
 nlp.max_length = 100000000
 
-#Create a function to return the list of files to process
-def return_forms(datadir = "./data/*/*/*"):
-#Create a List of Downloaded files  
-    print('Creating the list of files')
-    #datadir = "./data/*/*/*"
-    forms = glob(datadir, recursive=True)
-
-    #keep only the 10-k forms
-    print('filtering only the 10-K forms')
-    forms = {file for file in forms if file.split('_')[1][:4] == '10-K'}
-
-    #Remove the processed files
-    print('Removing the processed files')
-    processed_files = pd.read_sql('SELECT accession_number FROM form_data', con=engine)
-    processed_files = set(processed_files['accession_number'].tolist())
-    forms = [file.replace('\\','/') for file in forms if file.split('_')[5].split('.')[0] not in processed_files]
-    return forms
-
-
-#Creates the function to Clean the text, remove punctuation, stopwords, and lemmatize the text
-def process_text(text):
-    sentences = list(nlp(text, disable=['ner', 'entity_linker', 'textcat', 'entitry_ruler']).sents)
-    lemmatized_sentences = []
-    for sentence in sentences:
-        lemmatized_sentences.append([token.lemma_ for token in sentence if not token.is_stop and token.is_alpha])
-    return [' '.join(sentence) for sentence in lemmatized_sentences]
-
+#Set the path to the dictionaries
 #Create a function to load the dictionaries
-def load_dictionary(path):
+def load_dictionary(path= './dictionaries'):
     with open(path) as f:
         dictionary = f.readlines()
     dictionary = {word.strip() for word in dictionary}
     return dictionary
 
-#Create a function to count the words in the text
-def count_words(text, dictionary):
-    counter = 0
-    for sentence in text:
-        for word in sentence.split():
-            if word.lower() in dictionary:
-                counter += 1
-    return counter
+#Create a function to get the dictionaries
+def get_dictionaries(path):
+    path = os.path.join(path,'*.txt')
+    files = glob(path)  
+    dictionaries = dict()
+    for file in files:
+        words = load_dictionary(file)
+        dictionary_name = os.path.basename(file).split('.')[0]
+        dictionaries[dictionary_name] = words       
+    return dictionaries
 
-#Create a function to count the ngrams in the text
-def count_ngram(ngrams, dictionary):
+#Create a function to get the min and max ngram
+def get_max_ngram(dictionaries):
+    listoofwords = list()
+    for dictionary_name, dictionary in dictionaries.items():
+        for word in dictionary:
+            listoofwords.append(len(word.split()))
+    max_num = 0
+    for i in listoofwords:
+        if i > max_num:
+            max_num = i
+    return tuple(range(1,max_num+1)) 
+
+#Create a function to return the list of files to process
+def return_footnotes_id(conn):
+    query = text("""
+    Select textblock_id from fn32_06232023_10kq_cik
+   -- where not exists (Select 1 from footnotes where footnotes.textblock_id = fn32_06232023_10kq_cik.textblock_id)
+    limit 10000
+    """)
+    
+    df = pd.read_sql(query,conn)
+    return df.textblock_id.tolist()
+
+#Create a function to parse the text to a corpus     
+def parse_text_to_corpus(text):
+    return nlp(text, disable=['ner', 'entity_linker', 'textcat', 'entitry_ruler'])
+
+#Create a function to return the footnotes by id
+def return_footnotes_by_id(id, conn):
+    query = text("""
+    SELECT
+        *
+    FROM
+        fn32_06232023_10kq_cik
+    WHERE
+        textblock_id = :id
+    """)
+    df = pd.read_sql(query,conn, params={'id': id})
+    return df.to_dict('records')[0]
+
+#Create a function to count the number of tokens, the number of words, sentences, stopwords, unique words
+def count_words(corpus):
+    total_tokens = 0
+    counter_stop = 0
+    counter_words = 0
+    counter_sents = len(list(corpus.sents))
+    counter_unique = len({word.text.lower() for word in corpus if word.is_alpha})
+    for word in corpus:
+        if not word.is_punct and not word.is_currency and not word.is_space:
+            total_tokens +=1 
+        if word.is_stop:
+            counter_stop +=1             
+        if word.is_alpha:
+            counter_words +=1   
+    return  total_tokens, counter_sents, counter_words, counter_stop,counter_unique
+
+    
+#Create a function to count the number of words in a dictionary
+def count_dictionary(corpus, dictionary):
     counter = 0
-    for ngram in ngrams:
-        if ngram.lower() in dictionary:
+    sent_counter = 0
+    conter_by_words = dict()
+    for word in corpus:
+        if word.lower() in dictionary:
             counter += 1
-    return counter
+            conter_by_words[word] = conter_by_words.get(word,0) + 1
+    return counter, conter_by_words
 
-#Create a function to create the ngrams
-def create_ngram(text, n, sep='_'):
-    doc = nlp(text,disable=['ner', 'entity_linker', 'textcat', 'entitry_ruler'])
-    ngrams = extract.ngrams(doc, n, filter_stops=True, filter_punct=True, filter_nums=True, min_freq=1)
-    ngrams = [ngram.lemma_ for ngram in ngrams]
-    ngrams = [sep.join(ngram.lower().split()) for ngram in ngrams]
-    return ngrams
 
-#Create a function to process the files
-def get_form_data(file,doc_number,total_queue):
+#load the global variables
+dictionaries_path = './dictionaries'
+dictionaries = get_dictionaries(dictionaries_path)
+range_ngram = get_max_ngram(dictionaries)
 
-    print('Processing items from file {}/{} - {}'.format(doc_number+1,total_queue, file))
 
-    #create a dictionary with the form data
-    form_data = dict()
-    form_data['year'] = file.split('/')[2]
-    form_data['filling_date'] = file.split('/')[-1].split('_')[0]
-    form_data['form_type'] = file.split('_')[1]
-    form_data['cik'] = file.split('_')[4]
-    form_data['accession_number'] = file.split('_')[5].split('.')[0]
+#Create a function to process the footnotes by id
+def process_footnotes_by_id(id, dictionaries=dictionaries, conn = conn):
 
-    #Open the file
-    with open(file) as f:
-        corpus = f.read()
-    clean_text = process_text(corpus)
+    footnote = return_footnotes_by_id(id=id, conn=conn)
+    corpus = parse_text_to_corpus(footnote['readable_text'])
+    total_tokens, counter_sents, counter_words, counter_stop, counter_unique = count_words(corpus)
 
-    #Create the basic features
-    form_data['sentences'] = len(clean_text)
-    form_data['words'] = sum([len(sentence.split()) for sentence in clean_text])
+    footnote['total_tokens'] = total_tokens
+    footnote['number_sentences'] = counter_sents
+    footnote['number_words'] = counter_words
+    footnote['number_stopwords'] = counter_stop
+    footnote['number_uniquewords'] = counter_unique
+
+    dictionary_words = dict()
+    dictionary_wordlist = dict()
+    for sentence in corpus.sents:       
+        sentence_ngram = ngrams(sentence,range_ngram)    
+        sentence_ngram = [str(ngram.text).lower() for ngram in sentence_ngram]
+
+        for dictionary_name, dictionary in dictionaries.items():
+            word_counter = 0
+            sent_counter = 0
+            word_counter, conter_by_words = count_dictionary(sentence_ngram, dictionary) 
+            
+            if word_counter > 0:
+                sent_counter = 1
+                
+                #TODO
+                for word, value in conter_by_words.items():
+                    dictionary_words[word] = dictionary_words.get(word,0) + value  
+
+
+            footnote[dictionary_name] = footnote.get(dictionary_name,0) + word_counter
+            footnote[dictionary_name + '_sentences'] = footnote.get(dictionary_name + '_sentences',0) + sent_counter
+            
     
-    #Create the unigrams
-    form_data['innovation'] = count_words(clean_text, innovation_dictionary)
-    form_data['integrity'] = count_words(clean_text, integrity_dictionary)
-    form_data['quality'] = count_words(clean_text, quality_dictionary)
-    form_data['respect'] = count_words(clean_text, respect_dictionary)
-    form_data['teamwork'] = count_words(clean_text, teamwork_dictionary)
+            #dictionary_wordlist[dictionary_name] = dictionary_words 
 
-    #Create the bigrams
-    bi_grams = create_ngram(' '.join(clean_text), 2,sep = '_')
-    form_data['bi_innovation']  = count_ngram(bi_grams, innovation_dictionary)
-    form_data['bi_integrity']  = count_ngram(bi_grams, integrity_dictionary)
-    form_data['bi_quality']  = count_ngram(bi_grams, quality_dictionary)
-    form_data['bi_respect']  = count_ngram(bi_grams, respect_dictionary)
-    form_data['bi_teamwork']  = count_ngram(bi_grams, teamwork_dictionary)
-    
-    #Create the trigrams
-    tri_grams = create_ngram(' '.join(clean_text), 3,sep = '_')
-    form_data['tri_innovation']  = count_ngram(tri_grams, innovation_dictionary)
-    form_data['tri_integrity']  = count_ngram(tri_grams, integrity_dictionary)
-    form_data['tri_quality']  = count_ngram(tri_grams, quality_dictionary)
-    form_data['tri_respect']  = count_ngram(tri_grams, respect_dictionary)
-    form_data['tri_teamwork']  = count_ngram(tri_grams, teamwork_dictionary)
+    df = pd.DataFrame(footnote, index=[0])
+    df.to_sql('footnotes', conn, if_exists='append', index=False)
+    return 
 
-    #Save the data to the database
-    df = pd.DataFrame(form_data, index=[0])
-    df.to_sql('form_data', con=engine, if_exists='append', index=False)
-
-    return
-
-#Create a function to multi process the files
-def get_form_multi(files_to_extract,max_workers = 8):
+#Create a function to process multicore
+def process_footnotes_by_id_multicore(footnotes_id,max_workers = 8):
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        total_queue  = len(files_to_extract)
-        for file ,doc_number in zip(files_to_extract, range(0,total_queue)):
-            executor.submit(get_form_data, file,doc_number,total_queue)
-
-
-#Load the dictionary
-innovation_dictionary = load_dictionary('./dictionaries/Innovation.txt')
-integrity_dictionary = load_dictionary('./dictionaries/Integrity.txt')
-quality_dictionary = load_dictionary('./dictionaries/Quality.txt')
-respect_dictionary = load_dictionary('./dictionaries/Respect.txt')
-teamwork_dictionary = load_dictionary('./dictionaries/Teamwork.txt')
+        results = list(tqdm(executor.map(process_footnotes_by_id, footnotes_id), total=len(footnotes_id), desc='Processing footnotes', unit='files'))
+    return results 
 
 
 if __name__ == "__main__":
-
-    #Create a List of Downloaded files
-    forms = return_forms()
-
-    #Process the files
-    get_form_multi(forms,max_workers = 20)
+    #Get the footnotes id
+    footnotes_id = return_footnotes_id(conn=conn)
     
-    #For debugging
-    # for file ,doc_number in zip(forms, range(0,len(forms))):
-    #     get_form_data(file,doc_number,len(forms))
+    #Process the footnotes
+    process_footnotes_by_id_multicore(footnotes_id,max_workers = 12)
