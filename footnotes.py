@@ -8,13 +8,16 @@ from glob import glob
 from tqdm import tqdm
 
 #Set the connection to the database
-user = 'footnotes'
-password = 'ho9PC6eMXz3V5ZAujHpN'
-host = 'localhost'
+user = 'footnote'
+password = 'footnote'
+host = '192.168.50.153'
 dbname = 'footnotes'
-engine = create_engine("postgresql+psycopg2://{user}:{password}@{host}/{dbname}"
+#engine = create_engine("postgresql+psycopg2://{user}:{password}@{host}/{dbname}"
+#                    .format(user = user,password = password,host = host,dbname = dbname))
+engine = create_engine("postgresql://{user}:{password}@{host}/{dbname}"
                     .format(user = user,password = password,host = host,dbname = dbname))
 conn = engine.connect()
+
 
 #Load the spacy model
 nlp = spacy.load("en_core_web_sm")
@@ -57,7 +60,7 @@ def return_footnotes_id(conn):
     query = text("""
     Select textblock_id from fn32_06232023_10kq_cik
    -- where not exists (Select 1 from footnotes where footnotes.textblock_id = fn32_06232023_10kq_cik.textblock_id)
-    limit 10000
+    limit 100
     """)
     
     df = pd.read_sql(query,conn)
@@ -154,11 +157,12 @@ def process_footnotes_by_id(id, dictionaries=dictionaries, conn = conn):
             #dictionary_wordlist[dictionary_name] = dictionary_words 
 
     df = pd.DataFrame(footnote, index=[0])
-    df.to_sql('footnotes', conn, if_exists='append', index=False)
+    df.to_sql('footnotes', conn, if_exists='append',index=False)
+    conn.commit()
     return 
 
 #Create a function to process multicore
-def process_footnotes_by_id_multicore(footnotes_id,max_workers = 8):
+def process_footnotes_by_id_multicore(footnotes_id,max_workers = os.cpu_count()):
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         results = list(tqdm(executor.map(process_footnotes_by_id, footnotes_id), total=len(footnotes_id), desc='Processing footnotes', unit='files'))
     return results 
@@ -167,6 +171,6 @@ def process_footnotes_by_id_multicore(footnotes_id,max_workers = 8):
 if __name__ == "__main__":
     #Get the footnotes id
     footnotes_id = return_footnotes_id(conn=conn)
-    
+   
     #Process the footnotes
-    process_footnotes_by_id_multicore(footnotes_id,max_workers = 12)
+    process_footnotes_by_id_multicore(footnotes_id,max_workers=1)
