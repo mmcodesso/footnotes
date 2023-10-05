@@ -165,12 +165,13 @@ def process_footnotes_by_id(id, dictionaries=dictionaries, conn = conn):
 
             footnote[dictionary_name] = footnote.get(dictionary_name,0) + word_counter
             footnote[dictionary_name + '_sentences'] = footnote.get(dictionary_name + '_sentences',0) + sent_counter
-            footnote['counter_split'] = count_words_split(footnote)
+            #footnote['counter_split'] = count_words_split(footnote)
 
             #dictionary_wordlist[dictionary_name] = dictionary_words 
 
     df = pd.DataFrame(footnote, index=[0])
     df.to_sql('footnotes', conn, if_exists='append', index=False)
+    conn.commit()
     return 
 
 #Create a function to process multicore
@@ -185,4 +186,4 @@ if __name__ == "__main__":
     footnotes_id = return_footnotes_id(conn=conn)
     
     #Process the footnotes
-    process_footnotes_by_id_multicore(footnotes_id,max_workers = 12)
+    process_footnotes_by_id_multicore(footnotes_id)
