@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, text
 from textacy.extract.basics import ngrams
 from glob import glob
 from tqdm import tqdm
+from collections import Counter
 
 #Set the connection to the database
 user = 'footnote'
@@ -59,7 +60,7 @@ def get_max_ngram(dictionaries):
 def return_footnotes_id(conn):
     query = text("""
     Select textblock_id from fn32_06232023_10kq_cik
-   -- where not exists (Select 1 from footnotes where footnotes.textblock_id = fn32_06232023_10kq_cik.textblock_id)
+    where not exists (Select 1 from footnotes where footnotes.textblock_id = fn32_06232023_10kq_cik.textblock_id)
     limit 10000
     """)
     
@@ -70,7 +71,7 @@ def return_footnotes_id(conn):
 def return_footnotes_by_id(id, conn):
     query = text("""
     SELECT
-        *
+        readable_text
     FROM
         fn32_06232023_10kq_cik
     WHERE
@@ -90,7 +91,8 @@ def count_words(corpus):
     counter_stop = 0
     counter_words = 0
     counter_sents = len(list(corpus.sents))
-    counter_unique = len({word.text.lower() for word in corpus if word.is_alpha})
+    list_unique = Counter([word.text.lower() for word in corpus if word.is_alpha]).most_common()
+    counter_unique = len(list_unique)
 
     for word in corpus:
         if not word.is_punct and not word.is_currency and not word.is_space:
@@ -99,13 +101,12 @@ def count_words(corpus):
             counter_stop +=1             
         if word.is_alpha:
             counter_words +=1   
-    return  total_tokens, counter_sents, counter_words, counter_stop,counter_unique
+    return  total_tokens, counter_sents, counter_words, counter_stop,counter_unique,list_unique
 
     
 #Create a function to count the number of words in a dictionary
 def count_dictionary(corpus, dictionary):
     counter = 0
-    sent_counter = 0
     conter_by_words = dict()
     for word in corpus:
         if word.lower() in dictionary:
@@ -120,25 +121,15 @@ dictionaries = get_dictionaries(dictionaries_path)
 range_ngram = get_max_ngram(dictionaries)
 
 
-##### UDI AND RANI CODE
-from utils.preprocessor import clean_text, format_numbers
-def count_words_split(df):
-    text = df['readable_text']
-    text_clean = clean_text(text)
-    text_clean = format_numbers(text_clean)
-    word_count_only_text = len(text_clean.split())
-    
-    return word_count_only_text
-#####
-
-
 #Create a function to process the footnotes by id
 def process_footnotes_by_id(id, dictionaries=dictionaries, conn = conn):
 
-    footnote = return_footnotes_by_id(id=id, conn=conn)
-    corpus = parse_text_to_corpus(footnote['readable_text'])
-    total_tokens, counter_sents, counter_words, counter_stop, counter_unique = count_words(corpus)
-
+    readable_text = return_footnotes_by_id(id=id, conn=conn)
+    corpus = parse_text_to_corpus(readable_text['readable_text'])
+    total_tokens, counter_sents, counter_words, counter_stop, counter_unique, list_unique = count_words(corpus)
+    
+    footnote = dict()
+    footnote['textblock_id'] = id
     footnote['total_tokens'] = total_tokens
     footnote['number_sentences'] = counter_sents
     footnote['number_words'] = counter_words
@@ -157,22 +148,27 @@ def process_footnotes_by_id(id, dictionaries=dictionaries, conn = conn):
            
             if word_counter > 0:
                 sent_counter = 1
-               
-                #TODO
-                for word, value in conter_by_words.items():
-                    dictionary_words[word] = dictionary_words.get(word,0) + value
 
+                for word, value in conter_by_words.items():
+                    dictionary_words[(id,dictionary_name,word)] = dictionary_words.get((id,dictionary_name,word),0) + value
 
             footnote[dictionary_name] = footnote.get(dictionary_name,0) + word_counter
             footnote[dictionary_name + '_sentences'] = footnote.get(dictionary_name + '_sentences',0) + sent_counter
-            #footnote['counter_split'] = count_words_split(footnote)
 
-            #dictionary_wordlist[dictionary_name] = dictionary_words 
+    #export table with the unique words
+    unique_words = [{'textblock_id': id, 'dictionary_name': 'unique_words', 'word': item[0], 'frequency': item[1],  'term_length': len(item[0].split())} for item in list_unique]
+    pd.DataFrame(unique_words).to_sql('footnotes_frequency', conn, if_exists='append', index=False)
 
-    df = pd.DataFrame(footnote, index=[0])
-    df.to_sql('footnotes', conn, if_exists='append', index=False)
+    #export table with the dictionary words
+    dictionary_word_count = [{'textblock_id': word[0], 'dictionary_name': word[1], 'word': word[2], 'frequency': value, 'term_length': len(word[2].split())} for word, value in dictionary_words.items()]
+    pd.DataFrame(dictionary_word_count).to_sql('footnotes_frequency', conn, if_exists='append', index=False)
+
+    #export table with the footnotes
+    pd.DataFrame(footnote, index=[0]).to_sql('footnotes', conn, if_exists='append', index=False)
+    
+    #commit the changes
     conn.commit()
-    return 
+    return
 
 #Create a function to process multicore
 def process_footnotes_by_id_multicore(footnotes_id,max_workers = os.cpu_count()):
