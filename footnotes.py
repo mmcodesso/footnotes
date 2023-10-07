@@ -249,11 +249,13 @@ def process_footnotes_by_id(id_, list_dictionaries=dictionaries, connection = co
             footnote[dictionary_name + '_sentences'] = footnote.get(dictionary_name + '_sentences',0) + sent_counter
 
     #export table with the unique words
-    unique_words = [{'textblock_id': id_, 'dictionary_name': 'unique_words', 'word': item[0], 'frequency': item[1],  'term_length': len(item[0].split())} for item in list_unique]
+    unique_words = [{'textblock_id': id_, 'dictionary_name': 'unique_words', 'word': item[0], 
+                     'frequency': item[1],  'term_length': len(item[0].split())} for item in list_unique]
     pd.DataFrame(unique_words).to_sql('footnotes_frequency', connection, if_exists='append', index=False)
 
     #export table with the dictionary words
-    dictionary_word_count = [{'textblock_id': word[0], 'dictionary_name': word[1], 'word': word[2], 'frequency': value, 'term_length': len(word[2].split())} for word, value in dictionary_words.items()]
+    dictionary_word_count = [{'textblock_id': word[0], 'dictionary_name': word[1], 'word': word[2], 
+                              'frequency': value, 'term_length': len(word[2].split())} for word, value in dictionary_words.items()]
     pd.DataFrame(dictionary_word_count).to_sql('footnotes_frequency', connection, if_exists='append', index=False)
 
     #export table with the footnotes
@@ -276,7 +278,8 @@ def process_footnotes_by_id_multicore(list_footnotes_id, max_workers = os.cpu_co
         list: A list of results from processing the footnotes.
     """
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        results = list(tqdm(executor.map(process_footnotes_by_id, list_footnotes_id), total=len(list_footnotes_id), desc='Processing footnotes', unit='files'))
+        results = list(tqdm(executor.map(process_footnotes_by_id, list_footnotes_id),
+                             total=len(list_footnotes_id), desc='Processing footnotes', unit='files'))
     return results
 
 
