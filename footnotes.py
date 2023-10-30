@@ -17,6 +17,9 @@ PASSWORD = 'footnotes'
 HOST = 'postgresserver'
 DBNAME = 'footnotes'
 TABLE_NAME = 'fn32_06232023_10kq_cik'
+LIMIT = 100
+
+
 engine = create_engine("postgresql://{user}:{password}@{host}/{dbname}"
                     .format(user = USER,password = PASSWORD,host = HOST,dbname = DBNAME))
 conn = engine.connect()
@@ -119,7 +122,7 @@ def get_max_ngram(list_dictionaries):
     return tuple(range(1, max_num + 1))
 
 #Create a function to return the list of files to process
-def return_footnotes_id(connection,table_name = TABLE_NAME,limit = 1000):
+def return_footnotes_id(connection,table_name = TABLE_NAME,limit = 'ALL'):
     """
     Returns a list of textblock_ids from the fn32_06232023_10kq_cik table that
      do not exist in the footnotes table.
@@ -325,7 +328,7 @@ def process_footnotes_by_id_multicore(list_footnotes_id, max_workers = os.cpu_co
 
 if __name__ == "__main__":
     #Get the footnotes id
-    footnotes_id = return_footnotes_id(connection=conn)
+    footnotes_id = return_footnotes_id(connection=conn, limit=LIMIT,table_name = TABLE_NAME)
 
     #Process the footnotes
     process_footnotes_by_id_multicore(footnotes_id)
