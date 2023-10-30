@@ -7,23 +7,57 @@ from sqlalchemy import create_engine, text
 from textacy.extract.basics import ngrams
 from tqdm import tqdm
 import pandas as pd
+from io import StringIO
+import csv
 import spacy
 
 #Set the connection to the database
-USER = 'footnote'
-PASSWORD = 'footnote'
-HOST = '192.168.50.153'
+USER = 'footnotes'
+PASSWORD = 'footnotes'
+HOST = 'postgresserver'
 DBNAME = 'footnotes'
-#engine = create_engine("postgresql+psycopg2://{user}:{password}@{host}/{dbname}"
-#                    .format(user = user,password = password,host = host,dbname = dbname))
+TABLE_NAME = 'fn32_06232023_10kq_cik'
 engine = create_engine("postgresql://{user}:{password}@{host}/{dbname}"
                     .format(user = USER,password = PASSWORD,host = HOST,dbname = DBNAME))
 conn = engine.connect()
 
 
-#Load the spacy model
+
+def psql_insert_copy(table, conn, keys, data_iter):
+    """
+    Execute SQL statement inserting data
+
+    Parameters
+    ----------
+    table : pandas.io.sql.SQLTable
+    conn : sqlalchemy.engine.Engine or sqlalchemy.engine.Connection
+    keys : list of str
+        Column names
+    data_iter : Iterable that iterates the values to be inserted
+    """
+    # gets a DBAPI connection that can provide a cursor
+    dbapi_conn = conn.connection
+    with dbapi_conn.cursor() as cur:
+        s_buf = StringIO()
+        writer = csv.writer(s_buf)
+        writer.writerows(data_iter)
+        s_buf.seek(0)
+
+        columns = ', '.join('"{}"'.format(k) for k in keys)
+        if table.schema:
+            table_name = '{}.{}'.format(table.schema, table.name)
+        else:
+            table_name = table.name
+
+        sql = 'COPY {} ({}) FROM STDIN WITH CSV'.format(
+            table_name, columns)
+        cur.copy_expert(sql=sql, file=s_buf)
+
+
+
+
+#Load the spacy model and Increase the max length of the text to process
 nlp = spacy.load("en_core_web_sm")
-#Increase the max length of the text to process
 nlp.max_length = 100000000
 
 #Set the path to the dictionaries
@@ -85,7 +119,7 @@ def get_max_ngram(list_dictionaries):
     return tuple(range(1, max_num + 1))
 
 #Create a function to return the list of files to process
-def return_footnotes_id(connection):
+def return_footnotes_id(connection,table_name = TABLE_NAME,limit = 1000):
     """
     Returns a list of textblock_ids from the fn32_06232023_10kq_cik table that
      do not exist in the footnotes table.
@@ -97,16 +131,16 @@ def return_footnotes_id(connection):
         list: A list of textblock_ids.
     """
     query = text("""
-    Select textblock_id from fn32_06232023_10kq_cik
+    Select textblock_id from {table_name}
     where not exists (Select 1 from footnotes where
-        footnotes.textblock_id = fn32_06232023_10kq_cik.textblock_id)
-        limit 1000
-    """)
+        footnotes.textblock_id = {table_name}.textblock_id)
+        limit {limit}
+    """.format(table_name = table_name, limit = limit))
     df_footnotes = pd.read_sql(query, connection)
     return df_footnotes.textblock_id.tolist()
 
 #Create a function to return the footnotes by id
-def return_footnotes_by_id(footnote_id, connection):
+def return_footnotes_by_id(footnote_id, connection,table_name = TABLE_NAME):
     """
     Returns the readable text of a footnote given its ID.
 
@@ -121,10 +155,10 @@ def return_footnotes_by_id(footnote_id, connection):
     SELECT
         readable_text
     FROM
-        fn32_06232023_10kq_cik
+        {table_name}
     WHERE
         textblock_id = :id
-    """)
+    """.format(table_name = table_name))
     df_footnotes = pd.read_sql(query, connection, params={'id': footnote_id})
     return df_footnotes.to_dict('records')[0]
 
@@ -219,7 +253,7 @@ def process_footnotes_by_id(id_, list_dictionaries=dictionaries, connection = co
     Returns:
     - None
     """
-    readable_text = return_footnotes_by_id(footnote_id=id_, connection=connection)
+    readable_text = return_footnotes_by_id(footnote_id=id_, connection=connection,table_name = TABLE_NAME)
     corpus = parse_text_to_corpus(readable_text['readable_text'])
     total_tokens, counter_sents, counter_words, counter_stop, counter_unique, list_unique = count_words(corpus)
     
@@ -251,15 +285,21 @@ def process_footnotes_by_id(id_, list_dictionaries=dictionaries, connection = co
     #export table with the unique words
     unique_words = [{'textblock_id': id_, 'dictionary_name': 'unique_words', 'word': item[0], 
                      'frequency': item[1],  'term_length': len(item[0].split())} for item in list_unique]
-    pd.DataFrame(unique_words).to_sql('footnotes_frequency', connection, if_exists='append', index=False)
+    #pd.DataFrame(unique_words).to_sql('footnotes_frequency', connection, if_exists='append', index=False, method=psql_insert_copy)
 
     #export table with the dictionary words
     dictionary_word_count = [{'textblock_id': word[0], 'dictionary_name': word[1], 'word': word[2], 
                               'frequency': value, 'term_length': len(word[2].split())} for word, value in dictionary_words.items()]
-    pd.DataFrame(dictionary_word_count).to_sql('footnotes_frequency', connection, if_exists='append', index=False)
+    #pd.DataFrame(dictionary_word_count).to_sql('footnotes_frequency', connection, if_exists='append', index=False,method=psql_insert_copy)
+
+    unique_words_df = pd.DataFrame(unique_words)
+    worcount_df = pd.DataFrame(dictionary_word_count)
+    frequency_df = pd.concat([unique_words_df, worcount_df], ignore_index=True)
+    frequency_df.to_sql('footnotes_frequency', connection, if_exists='append', index=False,method=psql_insert_copy)
+
 
     #export table with the footnotes
-    pd.DataFrame(footnote, index=[0]).to_sql('footnotes', connection, if_exists='append', index=False)
+    pd.DataFrame(footnote, index=[0]).to_sql('footnotes', connection, if_exists='append', index=False,method=psql_insert_copy)
     
     #commit the changes
     connection.commit()
