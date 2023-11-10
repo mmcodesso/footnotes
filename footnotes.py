@@ -2,9 +2,11 @@ import concurrent.futures
 import os
 from glob import glob
 from collections import Counter
+import re
 
 from sqlalchemy import create_engine, text
 from textacy.extract.basics import ngrams
+from bs4 import BeautifulSoup
 from tqdm import tqdm
 import pandas as pd
 from io import StringIO
@@ -17,7 +19,7 @@ PASSWORD = 'footnotes'
 HOST = 'postgresserver'
 DBNAME = 'footnotes'
 TABLE_NAME = 'fn32_06232023_10kq_cik'
-LIMIT = 100
+LIMIT = 1000
 
 
 engine = create_engine("postgresql://{user}:{password}@{host}/{dbname}"
@@ -156,7 +158,7 @@ def return_footnotes_by_id(footnote_id, connection,table_name = TABLE_NAME):
     """
     query = text("""
     SELECT
-        readable_text
+        readable_text, value
     FROM
         {table_name}
     WHERE
@@ -195,9 +197,11 @@ def count_words(corpus):
     total_tokens = 0
     counter_stop = 0
     counter_words = 0
+    counter_numbers = 0
     counter_sents = len(list(corpus.sents))
     list_unique = Counter([word.text.lower() for word in corpus if word.is_alpha]).most_common()
     counter_unique = len(list_unique)
+    list_stopwords = Counter([word.text.lower() for word in corpus if word.is_stop]).most_common()
 
     for word in corpus:
         if not word.is_punct and not word.is_currency and not word.is_space:
@@ -206,7 +210,10 @@ def count_words(corpus):
             counter_stop +=1
         if word.is_alpha:
             counter_words +=1
-    return  total_tokens, counter_sents, counter_words, counter_stop,counter_unique,list_unique
+        if word.pos_ == 'NUM' and word.shape_[0] == 'd':
+            counter_numbers +=1
+
+    return  total_tokens, counter_sents, counter_words, counter_stop,list_stopwords,counter_unique,list_unique,counter_numbers
 
 
 #Create a function to count the number of words in a dictionary
@@ -234,6 +241,7 @@ def count_dictionary(corpus, dictionary):
 
 
 #load the global variables
+#TODO: load the dictionaries from the database
 DICTIONARIES_PATH = './dictionaries'
 dictionaries = get_dictionaries(DICTIONARIES_PATH)
 range_ngram = get_max_ngram(dictionaries)
@@ -258,7 +266,7 @@ def process_footnotes_by_id(id_, list_dictionaries=dictionaries, connection = co
     """
     readable_text = return_footnotes_by_id(footnote_id=id_, connection=connection,table_name = TABLE_NAME)
     corpus = parse_text_to_corpus(readable_text['readable_text'])
-    total_tokens, counter_sents, counter_words, counter_stop, counter_unique, list_unique = count_words(corpus)
+    total_tokens, counter_sents, counter_words, counter_stop, list_stopwords, counter_unique, list_unique, counter_numbers = count_words(corpus)
     
     footnote = dict()
     footnote['textblock_id'] = id_
@@ -267,6 +275,14 @@ def process_footnotes_by_id(id_, list_dictionaries=dictionaries, connection = co
     footnote['number_words'] = counter_words
     footnote['number_stopwords'] = counter_stop
     footnote['number_uniquewords'] = counter_unique
+    footnote['number_no_tables'] = counter_numbers
+
+    #Count number of the html
+    html = readable_text['value']
+    soup = BeautifulSoup(html,'html.parser').get_text(" ",strip=True)
+    html_corpus = parse_text_to_corpus(soup)
+    number_with_tables = len([word for word in html_corpus if word.shape_[0] == 'd'])
+    footnote['number_with_tables'] = number_with_tables
 
     dictionary_words = dict()
     for sentence in corpus.sents:       
@@ -288,16 +304,19 @@ def process_footnotes_by_id(id_, list_dictionaries=dictionaries, connection = co
     #export table with the unique words
     unique_words = [{'textblock_id': id_, 'dictionary_name': 'unique_words', 'word': item[0], 
                      'frequency': item[1],  'term_length': len(item[0].split())} for item in list_unique]
-    #pd.DataFrame(unique_words).to_sql('footnotes_frequency', connection, if_exists='append', index=False, method=psql_insert_copy)
+
+    #export table with the stopwords words
+    stop_words = [{'textblock_id': id_, 'dictionary_name': 'stop_words', 'word': item[0], 
+                     'frequency': item[1],  'term_length': len(item[0].split())} for item in list_stopwords]
 
     #export table with the dictionary words
     dictionary_word_count = [{'textblock_id': word[0], 'dictionary_name': word[1], 'word': word[2], 
                               'frequency': value, 'term_length': len(word[2].split())} for word, value in dictionary_words.items()]
-    #pd.DataFrame(dictionary_word_count).to_sql('footnotes_frequency', connection, if_exists='append', index=False,method=psql_insert_copy)
 
     unique_words_df = pd.DataFrame(unique_words)
     worcount_df = pd.DataFrame(dictionary_word_count)
-    frequency_df = pd.concat([unique_words_df, worcount_df], ignore_index=True)
+    stop_words_df = pd.DataFrame(stop_words)
+    frequency_df = pd.concat([unique_words_df, stop_words_df, worcount_df], ignore_index=True)
     frequency_df.to_sql('footnotes_frequency', connection, if_exists='append', index=False,method=psql_insert_copy)
 
 
