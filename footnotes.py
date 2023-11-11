@@ -16,10 +16,10 @@ import spacy
 #Set the connection to the database
 USER = 'footnotes'
 PASSWORD = 'footnotes'
-HOST = 'postgresserver'
+HOST = 'localhost'
 DBNAME = 'footnotes'
 TABLE_NAME = 'fn32_06232023_10kq_cik'
-LIMIT = 1000
+LIMIT = 'ALL'
 
 
 engine = create_engine("postgresql://{user}:{password}@{host}/{dbname}"
